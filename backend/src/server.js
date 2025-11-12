@@ -105,6 +105,9 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+    
+  // Authentification auprès de Repetier Server au démarrage
+  repetierClient.authenticate();
   console.log(`📡 WebSocket disponible sur ws://localhost:${PORT}`);
 });
 
