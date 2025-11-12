@@ -5,7 +5,51 @@ class RepetierClient {
     this.host = process.env.REPETIER_HOST || '192.168.1.100';
     this.port = process.env.REPETIER_PORT || '3344';
     this.apiKey = process.env.REPETIER_API_KEY;
+    this.login = process.env.REPETIER_LOGIN;
+    this.password = process.env.REPETIER_PASSWORD;
     this.baseUrl = `http://${this.host}:${this.port}/printer/api/`;
+    this.sessionId = null;
+  }
+
+  /**
+   * Authentification auprès de Repetier Server
+   * Nécessaire pour accéder aux endpoints protégés
+   */
+  async authenticate() {
+    try {
+      if (!this.login || !this.password) {
+        console.warn('⚠️  Aucun login/password configuré, tentative avec API key uniquement');
+        return false;
+      }
+
+      const response = await axios.post(this.baseUrl, {
+        apikey: this.apiKey,
+        data: {
+          login: this.login,
+          password: this.password,
+          rememberMe: false
+        },
+        command: 'login'
+      }, {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (response.data && response.data.sessionId) {
+        this.sessionId = response.data.sessionId;
+        console.log('✅ Authentification réussie, sessionId obtenu');
+        return true;
+      } else if (response.data && response.data.error) {
+        console.error('❌ Erreur d\'authentification:', response.data.error);
+        return false;
+      }
+
+      return false;
+    } catch (error) {
+      console.error('❌ Erreur lors de l\'authentification:', error.message);
+      return false;
+    }
   }
 
   /**
@@ -20,6 +64,11 @@ class RepetierClient {
         }
       };
 
+      // Ajouter le sessionId si disponible
+      if (this.sessionId) {
+        payload.sessionId = this.sessionId;
+      }
+
       if (command) {
         payload.data.command = command;
       }
@@ -28,132 +77,92 @@ class RepetierClient {
         headers: {
           'Content-Type': 'application/json'
         },
-        timeout: 10000
+        timeout: 5000
       });
 
       return response.data;
     } catch (error) {
-      console.error(`Erreur API Repetier (${command}):`, error.message);
-      throw new Error(`Erreur de communication avec Repetier Server: ${error.message}`);
+      console.error('Erreur requête Repetier:', error.message);
+      
+      // Si erreur de permission, tenter de se ré-authentifier
+      if (error.response && error.response.data && 
+          error.response.data.error && 
+          error.response.data.error.includes('permission')) {
+        console.log('🔄 Tentative de ré-authentification...');
+        const authSuccess = await this.authenticate();
+        if (authSuccess) {
+          // Réessayer la requête avec le nouveau sessionId
+          return this.request(command, data);
+        }
+      }
+      
+      throw error;
     }
   }
 
   /**
-   * Récupère l'état de l'imprimante
+   * Récupère l'état de toutes les imprimantes
    */
-  async getPrinterState() {
-    return await this.request('stateList');
+  async getState() {
+    return this.request('stateList');
   }
 
   /**
-   * Liste toutes les imprimantes disponibles
+   * Récupère les jobs de la file d'attente
    */
-  async listPrinters() {
-    return await this.request('listPrinter');
+  async getJobs() {
+    return this.request('listJobs');
   }
 
   /**
-   * Récupère les informations d'un modèle
+   * Upload un fichier G-code
    */
-  async getModelInfo(modelId) {
-    return await this.request('getModelInfo', { id: modelId });
+  async uploadFile(filename, gcode) {
+    try {
+      const formData = new FormData();
+      formData.append('apikey', this.apiKey);
+      if (this.sessionId) {
+        formData.append('sessionId', this.sessionId);
+      }
+      formData.append('name', filename);
+      formData.append('a', 'upload');
+      formData.append('file', gcode, filename);
+
+      const response = await axios.post(
+        `http://${this.host}:${this.port}/printer/model/`,
+        formData,
+        {
+          headers: formData.getHeaders(),
+          timeout: 30000
+        }
+      );
+
+      return response.data;
+    } catch (error) {
+      console.error('Erreur upload fichier:', error.message);
+      throw error;
+    }
   }
 
   /**
-   * Liste les fichiers G-code disponibles
+   * Démarre une impression
    */
-  async listModels() {
-    return await this.request('listModels');
+  async startPrint(jobId) {
+    return this.request('startJob', { id: jobId });
   }
 
   /**
-   * Lance une impression
+   * Met en pause une impression
    */
-  async startPrint(filename, printerId = 0) {
-    return await this.request('copyModel', {
-      id: printerId,
-      filename: filename,
-      autostart: 1
-    });
+  async pausePrint() {
+    return this.request('pause');
   }
 
   /**
-   * Arrête l'impression en cours
+   * Arrête une impression
    */
-  async stopPrint(printerId = 0) {
-    return await this.request('send', {
-      printer: printerId,
-      cmd: 'M112' // Emergency stop
-    });
-  }
-
-  /**
-   * Met en pause l'impression
-   */
-  async pausePrint(printerId = 0) {
-    return await this.request('send', {
-      printer: printerId,
-      cmd: 'M25' // Pause SD print
-    });
-  }
-
-  /**
-   * Reprend l'impression
-   */
-  async resumePrint(printerId = 0) {
-    return await this.request('send', {
-      printer: printerId,
-      cmd: 'M24' // Resume SD print
-    });
-  }
-
-  /**
-   * Définit la température de l'extrudeur
-   */
-  async setExtruderTemp(temp, printerId = 0) {
-    return await this.request('send', {
-      printer: printerId,
-      cmd: `M104 S${temp}`
-    });
-  }
-
-  /**
-   * Définit la température du lit chauffant
-   */
-  async setBedTemp(temp, printerId = 0) {
-    return await this.request('send', {
-      printer: printerId,
-      cmd: `M140 S${temp}`
-    });
-  }
-
-  /**
-   * Envoie une commande G-code personnalisée
-   */
-  async sendGCode(gcode, printerId = 0) {
-    return await this.request('send', {
-      printer: printerId,
-      cmd: gcode
-    });
-  }
-
-  /**
-   * Récupère les logs de l'imprimante
-   */
-  async getLogs(printerId = 0) {
-    return await this.request('messages', {
-      id: printerId
-    });
-  }
-
-  /**
-   * Home tous les axes
-   */
-  async homeAll(printerId = 0) {
-    return await this.request('send', {
-      printer: printerId,
-      cmd: 'G28' // Home all axes
-    });
+  async stopPrint() {
+    return this.request('stop');
   }
 }
 
